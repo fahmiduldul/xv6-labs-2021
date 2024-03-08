@@ -7,6 +7,8 @@
 #include "spinlock.h"
 #include "proc.h"
 
+pte_t* walk(pagetable_t pagetable, uint64 va, int alloc);
+
 uint64
 sys_exit(void)
 {
@@ -80,7 +82,32 @@ sys_sleep(void)
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 addr;
+  int n;
+  uint64 buff;
+  uint64 res = 0;
+
+  argaddr(0, &addr);
+  argint(1, &n);
+  argaddr(2, &buff);
+
+  pagetable_t pagetable = myproc()->pagetable;
+  addr = PGROUNDDOWN(addr);
+  uint64 addri = addr;
+  for(int i = 0; i < n; i++) {
+    pte_t* pte = walk(pagetable, addri, 0);
+
+    if(*pte & PTE_A){
+      printf("called A\n");
+      res = res | (1L << i);
+      *pte = *pte & (~PTE_A);
+    }
+
+    addri += PGSIZE;
+  }
+  printf("res: %p\n", res);
+  copyout(pagetable, buff, (char*)&res, sizeof(res));
+
   return 0;
 }
 #endif
