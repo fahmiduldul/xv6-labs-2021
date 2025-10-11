@@ -49,7 +49,9 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
+
+  uint64 stval = r_stval();
+  pte_t* pte = walk(p->pagetable, stval, 0);
   if(r_scause() == 8){
     // system call
 
@@ -67,6 +69,20 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if ((r_scause() == 15) && (*pte & PTE_COW)){
+    void* new_pa = kalloc();
+    if (new_pa == 0) {
+      printf("failed to alloc\n");
+      p->killed=1;
+      return;
+    }
+    void* cur_pa = (void*)PTE2PA(*pte);
+    uint64 new_perm = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+
+    memmove(new_pa, cur_pa, PGSIZE);
+
+    *pte = PA2PTE((uint64)new_pa) | new_perm | PTE_V;
+    kfree(cur_pa);
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
@@ -121,7 +137,7 @@ usertrapret(void)
   // tell trampoline.S the user page table to switch to.
   uint64 satp = MAKE_SATP(p->pagetable);
 
-  // jump to trampoline.S at the top of memory, which 
+  // jump to trampoline.S at the top of memory, which
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
   uint64 fn = TRAMPOLINE + (userret - trampoline);
@@ -130,14 +146,14 @@ usertrapret(void)
 
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
-void 
+void
 kerneltrap()
 {
   int which_dev = 0;
   uint64 sepc = r_sepc();
   uint64 sstatus = r_sstatus();
   uint64 scause = r_scause();
-  
+
   if((sstatus & SSTATUS_SPP) == 0)
     panic("kerneltrap: not from supervisor mode");
   if(intr_get() != 0)
@@ -207,7 +223,7 @@ devintr()
     if(cpuid() == 0){
       clockintr();
     }
-    
+
     // acknowledge the software interrupt by clearing
     // the SSIP bit in sip.
     w_sip(r_sip() & ~2);
@@ -217,4 +233,3 @@ devintr()
     return 0;
   }
 }
-

@@ -51,6 +51,10 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  unsigned short rc = get_refcount((uint64)pa);
+  set_refcount((uint64)pa, rc - 1);
+  if ((rc - 1) > 0) return;
+
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
@@ -74,6 +78,7 @@ kalloc(void)
   r = kmem.freelist;
   if(r)
     kmem.freelist = r->next;
+  set_refcount((uint64)r, 1);
   release(&kmem.lock);
 
   if(r)

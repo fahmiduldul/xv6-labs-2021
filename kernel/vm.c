@@ -15,6 +15,19 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+volatile unsigned short pa_idx[MAXPGIDX] = {0};
+
+unsigned short get_refcount(uint64 pa){
+  uint64 pgidx = PGROUNDDOWN(pa) >> 12;
+  return pa_idx[pgidx];
+}
+
+unsigned short set_refcount(uint64 pa, unsigned short n) {
+  uint64 pgidx = PGROUNDDOWN(pa) >> 12;
+  pa_idx[pgidx] = n;
+  return pa_idx[pgidx];
+}
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -45,7 +58,7 @@ kvmmake(void)
 
   // map kernel stacks
   proc_mapstacks(kpgtbl);
-  
+
   return kpgtbl;
 }
 
@@ -142,7 +155,7 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 
   if(size == 0)
     panic("mappages: size");
-  
+
   a = PGROUNDDOWN(va);
   last = PGROUNDDOWN(va + size - 1);
   for(;;){
@@ -303,7 +316,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -312,13 +324,18 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    if(flags & PTE_W) {
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = (*pte & ~PTE_W) | PTE_COW;
+    }
+
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0) {
       goto err;
     }
+
+    unsigned short rc = get_refcount(pa);
+    set_refcount(pa, rc + 1);
   }
   return 0;
 
@@ -347,9 +364,30 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+
+    pte = walk(pagetable, va0, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      return -1;
+
+    if(*pte & PTE_COW) {
+      char *new_pa = kalloc();
+      if(new_pa == 0)
+        return -1;
+
+      uint64 old_pa = PTE2PA(*pte);
+      memmove(new_pa, (char*)old_pa, PGSIZE);
+
+      uint64 new_perm = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+      *pte = PA2PTE((uint64)new_pa) | new_perm | PTE_V;
+
+      // Decrement refcount on old page
+      kfree((void*)old_pa);
+    }
+
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
